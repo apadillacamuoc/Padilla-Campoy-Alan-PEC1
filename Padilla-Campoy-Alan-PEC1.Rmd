@@ -1,0 +1,184 @@
+---
+title: "Padilla-Campoy-Alan-PEC1"
+author: "Alan Padilla Campoy"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+El documento que escogí es el documento **GastricCancer_NMR.xlsx** de la carpeta **2023-CIMCBTutorial** que son datos de cancer gastrico usados en un tutorial de analisis de datos metabolomicos.
+
+Lo primero que debemos hacer es leer el archivo. 
+El archivo Excel tiene dos hojas, la primera llamada *Data* y contiene lo siguiente:
+
+* **Idx:** número de identificación de la muestra
+* **SampleID:** código de identificación de la muestra
+* **SampleType:** es el tipo general de muestra, QC es un control del estudio y Sample es una muestra obtenida de un paciente. 
+* **Class:** es el tipo de muestra. QC (control del estudio), GC (muestra de paciente con cáncer), BN (muestra de paciente con tumor benigno) y HE (muestra de paciente sano).
+* **Metabolitos M1, M2, ..., M149:** las concentraciones de los metabolitos en las muestras de orina de los pacientes.
+
+La segunda hoja llamada *Peak* incluye la información relevante de cada metabolito. 
+
+* **Idx:** número de identificación del metabolito
+* **Name:** nombre que el metabolito tiene en la hoja *Data*
+* **Label:** nombre quimico del metabolito
+* **Perc_missing:** que porcentaje de muestras no contienen mediciones para este metabolito
+* **QC_RSD:** puntuación de calidad que representa la variación en las mediciones de este metabolito en todas las muestras
+
+```{r}
+library(readxl)
+library(SummarizedExperiment)
+
+data_sheet <- read_excel("GastricCancer_NMR.xlsx", sheet = "Data")
+peak_sheet <- read_excel("GastricCancer_NMR.xlsx", sheet = "Peak")
+```
+
+Posteriormente creamos el elemento SummarizedExperiment, utilizando la libreria descargada de Bioconductor. Primero extraemos la matriz de datos. Creamos *dataframes* de los metadatos de las filas y columnas. 
+
+```{r}
+data <- as.matrix(data_sheet[, 5:ncol(data_sheet)])  
+
+row_data <- data_sheet[, c("Idx", "SampleID", "SampleType", "Class")]
+col_data <- peak_sheet[, c("Idx", "Name", "Label", "Perc_missing", "QC_RSD")]
+
+rownames(data) <- row_data$SampleID    
+colnames(data) <- col_data$Name
+```
+Posteriormente podemos utilizar esa información de las filas y columnas para crear el objeto SummarizedExperiment.
+```{r}
+se_object <- SummarizedExperiment(
+  assays = list(counts = data),
+  rowData = row_data,
+  colData = col_data
+)
+
+se_object
+```
+
+Para poder acceder a la información con facilidad podriamos generar un archivo binario .Rda, que contenga los datos y metadatos. 
+
+```{r}
+save(se_object, file = "GastricCancer_NMR_data.Rda")
+```
+
+Para generar un archivo de texto con la matriz de los datos podemos hacerlo de la siguiente manera:
+
+```{r}
+data_matrix <- assay(se_object, "counts")
+row_metadata <- rowData(se_object)
+col_metadata <- colData(se_object)
+
+write.table(data_matrix, file = "datos.txt", sep = "\t", row.names = TRUE, col.names = TRUE, quote = FALSE)
+```
+
+
+Para generar un archivo .md con los metadatos podemos hacerlo así:
+
+```{r}
+
+fileConn <- file("metadatos_dataset.md")
+
+writeLines(c(
+  "# Metadatos del Dataset",
+  "",
+  "## Información General",
+  paste("Número de muestras:", dim(se_object)[1]),
+  paste("Número de metabolitos:", dim(se_object)[2]),
+  "",
+  "## Resumen del Objeto",
+  "```",
+  capture.output(print(se_object)),
+  "```",
+  "",
+  "## Metadatos de las Muestras",
+  "```",
+  capture.output(head(rowData(se_object))),
+  "```",
+  "",
+  "## Metadatos de los Metabolitos",
+  "```",
+  capture.output(head(colData(se_object))),
+  "```"
+), fileConn)
+
+close(fileConn)
+```
+
+
+### Exploracion general de los datos
+
+Para explorar los datos podemos utilizar el objeto SummarizedExperiment que acabamos de crear. Primero extraemos las concentraciones de metabolitos, las clases de los datos y lo combinamos en un *dataframe*. También nos aseguramos que las clases sean únicas. 
+
+```{r}
+metabolite_data <- assay(se_object)
+class_data <- rowData(se_object)$Class
+data_combined <- as.data.frame(metabolite_data)
+data_combined$Class <- class_data
+unique_classes <- unique(class_data)
+```
+
+Podemos comparar la estadística descriptiva para ver que características generales tienen los datos. 
+
+```{r}
+summary_data <- data.frame(
+    Mean = colMeans(assay(se_object), na.rm = TRUE),
+    SD = apply(assay(se_object), 2, sd, na.rm = TRUE),
+    Min = apply(assay(se_object), 2, min, na.rm = TRUE),
+    Max = apply(assay(se_object), 2, max, na.rm = TRUE)
+)
+summary_data
+```
+
+Tambien hacemos un análisis de componentes principales, PCA. Para ver mejor como se agrupan los datos. 
+
+```{r}
+library(ggplot2)
+
+data_matrix <- assay(se_object)
+data_matrix[is.na(data_matrix)] <- 0
+assay(se_object) <- data_matrix
+normalized_data <- log1p(assay(se_object))
+pca_result <- prcomp(normalized_data, center = TRUE, scale. = TRUE)
+pca_data <- as.data.frame(pca_result$x)
+pca_data$Class <- rowData(se_object)$Class
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Class)) +
+    geom_point(size = 3) +
+    labs(title = "PCA de Metabolitos", x = "Componente Principal 1", y = "Componente Principal 2") +
+    theme_minimal() +
+    scale_color_manual(values = c("red", "blue", "green", "purple"))
+
+```
+
+De igual manera podemos generar un diagrama de caja que nos ayuda a visualizar las diferencias entre clases. Hacemos uno para el componente principal 1.
+
+```{r}
+ggplot(data = pca_data, aes(x = Class, y = PC1)) + 
+    geom_boxplot() +
+    labs(title = "Boxplot de PC1 por Clase")
+```
+
+Y posteriormente hacemos uno del componente principal 2. Y esto se puede repetir con todos los PC. 
+
+```{r}
+ggplot(data = pca_data, aes(x = Class, y = PC2)) + 
+    geom_boxplot() +
+    labs(title = "Boxplot de PC2 por Clase")
+```
+
+
+Podemos realizar tambien una comparación entre metabolitos, aqui estamos comprando el M1, M2 y M3, pero se puede comparar cualquier combinación. 
+
+```{r}
+selected_metabolites <- c("M1", "M2", "M3")
+
+par(mfrow = c(1, length(selected_metabolites)))
+for (metabolite in selected_metabolites) {
+  boxplot(data_combined[[metabolite]] ~ data_combined$Class,
+          main = paste("Boxplot de", metabolite),
+          xlab = "Clase",
+          ylab = "Concentración",
+          col = c("red", "blue", "green", "purple"), 
+          names = unique_classes)
+}
+```
+
